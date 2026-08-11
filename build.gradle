@@ -1,0 +1,26 @@
+plugins {
+    id 'java'
+}
+
+group = 'gg.nationsglory'
+version = '1.0.0'
+
+sourceCompatibility = '1.7'
+targetCompatibility = '1.7'
+
+compileJava { options.encoding = 'UTF-8' }
+
+repositories { mavenCentral() }
+
+jar {
+    archiveBaseName = 'mcpc-java8-agent'
+    archiveVersion = ''
+    manifest {
+        attributes(
+            'Premain-Class': 'gg.nationsglory.mcpcj8.McpcJava8Agent',
+            'Can-Retransform-Classes': 'false',
+            'Implementation-Title': 'MCPC+ Java 8 Agent',
+            'Implementation-Version': project.version
+        )
+    }
+}
