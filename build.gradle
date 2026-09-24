@@ -13,7 +13,7 @@ plugins {
 }
 
 group = 'gg.nationsglory'
-version = '2.0.0'
+version = '2.0.1'
 
 compileJava {
     options.encoding = 'UTF-8'
@@ -49,6 +49,9 @@ dependencies {
  *    read Java 8+ bytecode (lambdas, interface static methods, type annotations...): the call is
  *    forwarded to the next visitor, as for any method the visitor does not override.
  *  - The interface flag of method calls survives ASM 4 visitors (see LegacyAsmApi).
+ *  - Remapper.mapSignature returns an empty signature unchanged instead of failing. Coremods of
+ *    that era write methods with an empty Signature attribute, which Forge's deobfuscation then
+ *    remaps (the agent's former patched ASM 4 Remapper had the same fix).
  */
 def patchedAsmDir = layout.buildDirectory.dir('patched-asm')
 def legacyApi = 'org/objectweb/asm/LegacyAsmApi'
@@ -72,6 +75,26 @@ def asmPatches = [
                 '(ILjava/lang/String;II)V', false))
         lenient.add(new InsnNode(Opcodes.ARETURN))
         replaceThrow(method, create, lenient)
+    },
+    'org/objectweb/asm/commons/Remapper': { ClassNode node ->
+        def method = node.methods.find { it.name == 'mapSignature' && it.desc == '(Ljava/lang/String;Z)Ljava/lang/String;' }
+        if (method == null) {
+            throw new GradleException('ASM Remapper.mapSignature not found')
+        }
+        // if (signature == null || signature.isEmpty()) return signature;
+        def remap = new LabelNode()
+        def unchanged = new LabelNode()
+        def guard = new InsnList()
+        guard.add(new VarInsnNode(Opcodes.ALOAD, 1))
+        guard.add(new JumpInsnNode(Opcodes.IFNULL, unchanged))
+        guard.add(new VarInsnNode(Opcodes.ALOAD, 1))
+        guard.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, 'java/lang/String', 'length', '()I', false))
+        guard.add(new JumpInsnNode(Opcodes.IFNE, remap))
+        guard.add(unchanged)
+        guard.add(new VarInsnNode(Opcodes.ALOAD, 1))
+        guard.add(new InsnNode(Opcodes.ARETURN))
+        guard.add(remap)
+        method.instructions.insert(guard)
     },
     'org/objectweb/asm/ClassVisitor': { ClassNode node -> removeApiChecks(node) },
     'org/objectweb/asm/FieldVisitor': { ClassNode node -> removeApiChecks(node) },
