@@ -54,6 +54,9 @@ dependencies {
  *  - Remapper.mapSignature returns an empty signature unchanged instead of failing. Coremods of
  *    that era write methods with an empty Signature attribute, which Forge's deobfuscation then
  *    remaps (the agent's former patched ASM 4 Remapper had the same fix).
+ *  - Remapper keeps the mapFieldName / mapMethodName overloads taking the member's access flags
+ *    that MCPC+'s ASM 4 added: SpecialSource calls them to remap every Bukkit plugin, which
+ *    otherwise fails to load with NoSuchMethodError.
  */
 def patchedAsmDir = layout.buildDirectory.dir('patched-asm')
 def legacyApi = 'org/objectweb/asm/LegacyAsmApi'
@@ -97,6 +100,8 @@ def asmPatches = [
         guard.add(new InsnNode(Opcodes.ARETURN))
         guard.add(remap)
         method.instructions.insert(guard)
+        addAccessOverloads(node, 'mapFieldName')
+        addAccessOverloads(node, 'mapMethodName')
     },
     'org/objectweb/asm/ClassVisitor': { ClassNode node -> removeApiChecks(node) },
     'org/objectweb/asm/FieldVisitor': { ClassNode node -> removeApiChecks(node) },
@@ -134,6 +139,42 @@ def asmPatches = [
         removeApiChecks(node)
     },
 ]
+
+/**
+ * Gives Remapper the {@code (owner, name, descriptor, access)} overload of {@code methodName} that
+ * MCPC+'s ASM 4 had: the 3 argument method calls it with access 0, and it returns the name
+ * unchanged. MCPC+'s SpecialSource (JarRemapper) overrides the 4 argument method and calls it
+ * directly when remapping Bukkit plugins.
+ */
+def addAccessOverloads(ClassNode node, String methodName) {
+    def string = 'Ljava/lang/String;'
+    def threeArgs = "(${string}${string}${string})${string}".toString()
+    def fourArgs = "(${string}${string}${string}I)${string}".toString()
+    def method = node.methods.find { it.name == methodName && it.desc == threeArgs }
+    if (method == null) {
+        throw new GradleException("ASM Remapper.${methodName} not found")
+    }
+    if (node.methods.any { it.name == methodName && it.desc == fourArgs }) {
+        throw new GradleException("ASM Remapper.${methodName} already has an access overload")
+    }
+    // return this.<methodName>(owner, name, descriptor, 0);
+    def delegate = new InsnList()
+    delegate.add(new VarInsnNode(Opcodes.ALOAD, 0))
+    delegate.add(new VarInsnNode(Opcodes.ALOAD, 1))
+    delegate.add(new VarInsnNode(Opcodes.ALOAD, 2))
+    delegate.add(new VarInsnNode(Opcodes.ALOAD, 3))
+    delegate.add(new InsnNode(Opcodes.ICONST_0))
+    delegate.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, node.name, methodName, fourArgs, false))
+    delegate.add(new InsnNode(Opcodes.ARETURN))
+    method.instructions = delegate
+    method.tryCatchBlocks = []
+    method.localVariables = null
+    // public String <methodName>(String owner, String name, String descriptor, int access) { return name; }
+    def overload = new MethodNode(Opcodes.ACC_PUBLIC, methodName, fourArgs, null, null)
+    overload.instructions.add(new VarInsnNode(Opcodes.ALOAD, 2))
+    overload.instructions.add(new InsnNode(Opcodes.ARETURN))
+    node.methods.add(overload)
+}
 
 /** The NEW of the exception thrown right after {@code insn}. */
 def previousNew(AbstractInsnNode insn) {
