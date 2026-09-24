@@ -3,23 +3,24 @@ plugins {
 }
 
 group = 'gg.nationsglory'
-version = '1.0.0'
+version = '2.0.0'
 
-sourceCompatibility = '1.7'
-targetCompatibility = '1.7'
-
-compileJava { options.encoding = 'UTF-8' }
+compileJava {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
 
 repositories { mavenCentral() }
 
 jar {
-    archiveBaseName = 'mcpc-java8-agent'
+    archiveBaseName = 'mcpc-java17-agent'
     archiveVersion = ''
     manifest {
         attributes(
-            'Premain-Class': 'gg.nationsglory.mcpcj8.McpcJava8Agent',
+            'Premain-Class': 'gg.nationsglory.mcpcj17.McpcJava17Agent',
+            'Can-Redefine-Classes': 'false',
             'Can-Retransform-Classes': 'false',
-            'Implementation-Title': 'MCPC+ Java 8 Agent',
+            'Implementation-Title': 'MCPC+ Java 17 Agent',
             'Implementation-Version': project.version
         )
     }
