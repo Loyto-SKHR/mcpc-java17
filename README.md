@@ -101,7 +101,7 @@ L'agent requiert Java 17 ou plus récent ; il ne se charge pas sous Java 8.
 ./gradlew jar
 ```
 
-Nécessite un JDK 17 ou plus récent. Le jar est produit dans `build/libs/mcpc-java17-agent.jar` et contient ASM (téléchargé depuis Maven Central et adapté au build, voir `build.gradle`) ; il n'a besoin de rien d'autre à l'exécution.
+Nécessite un JDK 17 ou plus récent. La CI GitHub Actions construit le jar à chaque push ; pousser un tag `vX.Y.Z` publie une release avec le jar attaché. Le jar est produit dans `build/libs/mcpc-java17-agent.jar` et contient ASM (téléchargé depuis Maven Central et adapté au build, voir `build.gradle`) ; il n'a besoin de rien d'autre à l'exécution.
 
 ## Contenu
 
