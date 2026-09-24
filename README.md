@@ -74,6 +74,7 @@ puis le serveur démarre normalement (`Done (...)! For help, type "help"`).
 | `Unrecognized VM option 'UseConcMarkSweepGC'` | Retirez les options `CMS` du script (voir étape 3). |
 | `UnsupportedClassVersionError` au lancement | Vous n'êtes pas en Java 17 : vérifiez `java -version`, ou indiquez le chemin complet de Java 17 dans le script. |
 | `Java 8 is not supported on MCPC+...` | L'agent n'est pas chargé (voir la première ligne). |
+| `Block ID ... is outside the supported range` | Un mod utilise un ID très élevé : ajoutez `-Dmcpcj17.idCapacity=1048576` (ou plus) avant `-jar`. |
 
 Si le serveur plante malgré tout, ouvrez une issue avec le log complet (`ForgeModLoader-server-0.log`).
 
@@ -85,7 +86,10 @@ Au démarrage, avant le serveur :
 - corrige launchwrapper et le chargement des classes du JDK pour Java 9+ ;
 - ouvre au serveur les API internes du JDK, dont Forge, Bukkit et les mods se servent ;
 - remplace `sun.reflect`, supprimé depuis Java 9 (ajout de biomes, matériaux... par Forge) ;
-- remplace ASM 4 par **ASM 9.7** : les mods compilés en Java 8+ et les coremods récents se chargent.
+- remplace ASM 4 par **ASM 9.7** : les mods compilés en Java 8+ et les coremods récents se chargent ;
+- accepte les mods qui utilisent des IDs au-delà des limites vanilla (4096 blocs, 32000 items), jusqu'à 65536 par défaut.
+
+> **Blocs au-delà de 4095 :** MCPC+ ne sait pas les enregistrer dans le monde. Ils sont chargés comme **blocs factices** : le mod fonctionne, mais ces blocs ne peuvent pas être posés (ils sont remplacés par de l'air, et la console l'indique). Les blocs et items sous ces limites ne sont pas concernés.
 
 L'agent ne modifie ni le monde, ni les mods, ni les fichiers du serveur. Il ne rend pas compatibles les mods ou plugins qui utilisent des fonctions retirées du JDK (moteur JavaScript Nashorn, `javax.xml.bind`...).
 

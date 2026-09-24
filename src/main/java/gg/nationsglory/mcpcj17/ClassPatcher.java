@@ -41,6 +41,8 @@ public final class ClassPatcher implements ClassFileTransformer {
             Collections.synchronizedMap(new WeakHashMap<ClassLoader, Boolean>());
     private final Map<ClassLoader, Boolean> configuredLoaders =
             Collections.synchronizedMap(new WeakHashMap<ClassLoader, Boolean>());
+    private final Map<ClassLoader, Boolean> idPatchesEnabled =
+            Collections.synchronizedMap(new WeakHashMap<ClassLoader, Boolean>());
 
     public ClassPatcher() {
         for (Map.Entry<String, String> entry : TARGETS.entrySet()) {
@@ -72,8 +74,7 @@ public final class ClassPatcher implements ClassFileTransformer {
     public byte[] transform(ClassLoader loader, String className, Class<?> redefined,
             ProtectionDomain domain, byte[] original) {
         try {
-            if (loader != null && LAUNCH_CLASS_LOADER.equals(loader.getClass().getName())
-                    && configuredLoaders.put(loader, Boolean.TRUE) == null) {
+            if (isLaunchClassLoader(loader) && configuredLoaders.put(loader, Boolean.TRUE) == null) {
                 LaunchHooks.configure(loader, agentJar != null && isLegacyAsm(loader));
             }
             if (className != null && className.startsWith(ASM_PREFIX)) {
@@ -87,19 +88,81 @@ public final class ClassPatcher implements ClassFileTransformer {
                     System.out.println("[mcpc-j17] Patched: " + className);
                     return patch;
                 }
-                if (loader != null && !className.startsWith("gg/nationsglory/mcpcj17/")
-                        && (indexOf(original, SUN_REFLECT_SLASH) >= 0 || indexOf(original, SUN_REFLECT_DOT) >= 0)) {
-                    byte[] redirected = redirectSunReflect(original);
+                if (loader == null || className.startsWith("gg/nationsglory/mcpcj17/")) {
+                    return null;
+                }
+                byte[] bytes = original;
+                if (indexOf(bytes, SUN_REFLECT_SLASH) >= 0 || indexOf(bytes, SUN_REFLECT_DOT) >= 0) {
+                    byte[] redirected = redirectSunReflect(bytes);
                     if (redirected != null) {
                         System.out.println("[mcpc-j17] Redirected sun.reflect in: " + className);
-                        return redirected;
+                        bytes = redirected;
                     }
                 }
+                if (isLaunchClassLoader(loader) && idPatchesEnabled(loader)) {
+                    byte[] raised = IdPatches.patch(className, bytes);
+                    if (raised != null) {
+                        bytes = raised;
+                    }
+                }
+                return bytes == original ? null : bytes;
             }
         } catch (Throwable t) {
             System.out.println("[mcpc-j17] Could not patch " + className + ", leaving it untouched: " + t);
         }
         return null;
+    }
+
+    /**
+     * Loads every bundled ASM class now. The agent itself uses ASM while transforming classes, and
+     * the JVM does not transform the classes loaded from within a transformer: loaded there, they
+     * would come from the server's ASM 4 unchanged and mix with the upgraded ones.
+     */
+    void preloadAsm() {
+        if (agentJar == null) {
+            return;
+        }
+        ClassLoader appLoader = ClassLoader.getSystemClassLoader();
+        int loaded = 0;
+        for (JarEntry entry : Collections.list(agentJar.entries())) {
+            String name = entry.getName();
+            if (name.startsWith(ASM_PREFIX) && name.endsWith(".class")) {
+                try {
+                    Class.forName(name.substring(0, name.length() - 6).replace('/', '.'), false, appLoader);
+                    loaded++;
+                } catch (Throwable ignored) {
+                    // Absent from the server's own ASM, or not loadable on its own: not needed.
+                }
+            }
+        }
+        System.out.println("[mcpc-j17] " + loaded + " ASM classes preloaded.");
+    }
+
+    private static boolean isLaunchClassLoader(ClassLoader loader) {
+        return loader != null && LAUNCH_CLASS_LOADER.equals(loader.getClass().getName());
+    }
+
+    /**
+     * The raised ID limits only apply to stock MCPC+: a server with its own ID extension (NGServer)
+     * keeps it. They can also be turned off with -Dmcpcj17.idCapacity=off.
+     */
+    private boolean idPatchesEnabled(ClassLoader loader) {
+        Boolean enabled = idPatchesEnabled.get(loader);
+        if (enabled == null) {
+            if ("off".equalsIgnoreCase(System.getProperty(IdCapacity.PROPERTY))) {
+                System.out.println("[mcpc-j17] ID limits left unchanged (-D" + IdCapacity.PROPERTY + "=off).");
+                enabled = false;
+            } else if (loader.getResource("fr/nationsglory/ngid/NGCapaciteIds.class") != null) {
+                System.out.println("[mcpc-j17] The server has its own ID extension, ID limits left unchanged.");
+                enabled = false;
+            } else {
+                System.out.println("[mcpc-j17] Raising the ID limits to " + IdCapacity.blocks()
+                        + " (blocks above " + IdCapacity.MAX_STORABLE_BLOCK + " are placeholders).");
+                enabled = true;
+            }
+            idPatchesEnabled.put(loader, enabled);
+        }
+        return enabled;
     }
 
     /**

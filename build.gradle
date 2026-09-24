@@ -13,7 +13,7 @@ plugins {
 }
 
 group = 'gg.nationsglory'
-version = '2.0.1'
+version = '2.1.0'
 
 compileJava {
     options.encoding = 'UTF-8'
@@ -32,6 +32,8 @@ configurations {
 }
 
 dependencies {
+    // The agent's own ASM code (IdPatches) runs against the ASM it serves to the server.
+    compileOnly "org.ow2.asm:asm-tree:${asmVersion}"
     bundledAsm "org.ow2.asm:asm:${asmVersion}"
     bundledAsm "org.ow2.asm:asm-tree:${asmVersion}"
     bundledAsm "org.ow2.asm:asm-commons:${asmVersion}"

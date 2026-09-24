@@ -26,7 +26,9 @@ public final class McpcJava17Agent {
 
     private static void installClassPatches(Instrumentation inst) {
         try {
-            inst.addTransformer(new ClassPatcher());
+            ClassPatcher patcher = new ClassPatcher();
+            inst.addTransformer(patcher);
+            patcher.preloadAsm();
         } catch (Throwable t) {
             System.out.println("[mcpc-j17] Could not install class patches, continuing: " + t);
         }
