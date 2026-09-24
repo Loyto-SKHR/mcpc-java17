@@ -1,3 +1,13 @@
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.Opcodes
+import org.objectweb.asm.tree.*
+
+buildscript {
+    repositories { mavenCentral() }
+    dependencies { classpath 'org.ow2.asm:asm-tree:9.7' }
+}
+
 plugins {
     id 'java'
 }
@@ -12,16 +22,173 @@ compileJava {
 
 repositories { mavenCentral() }
 
+def asmVersion = '9.7'
+
+configurations {
+    // ASM shipped inside the agent, replacing the ASM 4 of MCPC+ at runtime.
+    bundledAsm { transitive = false }
+    // The Remapping*Adapter classes Forge 1.6.4 still uses were removed after ASM 7.0.
+    legacyAsmCommons { transitive = false }
+}
+
+dependencies {
+    bundledAsm "org.ow2.asm:asm:${asmVersion}"
+    bundledAsm "org.ow2.asm:asm-tree:${asmVersion}"
+    bundledAsm "org.ow2.asm:asm-commons:${asmVersion}"
+    bundledAsm "org.ow2.asm:asm-analysis:${asmVersion}"
+    bundledAsm "org.ow2.asm:asm-util:${asmVersion}"
+    legacyAsmCommons 'org.ow2.asm:asm-commons:7.0'
+}
+
+/*
+ * The bundled ASM is patched to behave like the ASM 4 that Forge 1.6.4, MCPC+ and their mods were
+ * written for:
+ *  - Type.getType(String) accepts an internal name ("net/minecraftforge/event/Event"), as ASM 4
+ *    did; Forge's EventTransformer relies on it. It returns the object type of that name.
+ *  - Visitors declared with the ASM 4 API no longer throw "This feature requires ASM5" when they
+ *    read Java 8+ bytecode (lambdas, interface static methods, type annotations...): the call is
+ *    forwarded to the next visitor, as for any method the visitor does not override.
+ *  - The interface flag of method calls survives ASM 4 visitors (see LegacyAsmApi).
+ */
+def patchedAsmDir = layout.buildDirectory.dir('patched-asm')
+def legacyApi = 'org/objectweb/asm/LegacyAsmApi'
+def asmPatches = [
+    'org/objectweb/asm/Type': { ClassNode node ->
+        def method = node.methods.find { it.name == 'getTypeInternal' }
+        def create = method.instructions.find {
+            it.opcode == Opcodes.NEW && it.desc == 'java/lang/IllegalArgumentException'
+        }
+        if (create == null) {
+            throw new GradleException('ASM Type.getTypeInternal: invalid descriptor branch not found')
+        }
+        def lenient = new InsnList()
+        lenient.add(new TypeInsnNode(Opcodes.NEW, 'org/objectweb/asm/Type'))
+        lenient.add(new InsnNode(Opcodes.DUP))
+        lenient.add(new IntInsnNode(Opcodes.BIPUSH, 12)) // Type.INTERNAL
+        lenient.add(new VarInsnNode(Opcodes.ALOAD, 0))
+        lenient.add(new VarInsnNode(Opcodes.ILOAD, 1))
+        lenient.add(new VarInsnNode(Opcodes.ILOAD, 2))
+        lenient.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, 'org/objectweb/asm/Type', '<init>',
+                '(ILjava/lang/String;II)V', false))
+        lenient.add(new InsnNode(Opcodes.ARETURN))
+        replaceThrow(method, create, lenient)
+    },
+    'org/objectweb/asm/ClassVisitor': { ClassNode node -> removeApiChecks(node) },
+    'org/objectweb/asm/FieldVisitor': { ClassNode node -> removeApiChecks(node) },
+    'org/objectweb/asm/commons/InstructionAdapter': { ClassNode node -> removeApiChecks(node) },
+    'org/objectweb/asm/MethodVisitor': { ClassNode node ->
+        def fiveArgs = node.methods.find {
+            it.name == 'visitMethodInsn' && it.desc == '(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V'
+        }
+        def fourArgs = node.methods.find {
+            it.name == 'visitMethodInsn' && it.desc == '(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V'
+        }
+        // 5 args, ASM 4 visitor: record the interface flag instead of throwing, call the 4 args
+        // method, then drop the flag if nothing consumed it.
+        def interfaceCheck = fiveArgs.instructions.find {
+            it.opcode == Opcodes.LDC && it.cst instanceof String && it.cst.startsWith('INVOKESPECIAL/STATIC')
+        }
+        if (interfaceCheck == null) {
+            throw new GradleException('ASM MethodVisitor.visitMethodInsn: interface check not found')
+        }
+        def pend = new InsnList()
+        pend.add(new VarInsnNode(Opcodes.ILOAD, 5))
+        pend.add(new MethodInsnNode(Opcodes.INVOKESTATIC, legacyApi, 'pendInterface', '(Z)V', false))
+        replaceThrow(fiveArgs, previousNew(interfaceCheck), pend)
+        def legacyCall = fiveArgs.instructions.find {
+            it instanceof MethodInsnNode && it.name == 'visitMethodInsn' && it.desc == fourArgs.desc
+        }
+        fiveArgs.instructions.insert(legacyCall,
+                new MethodInsnNode(Opcodes.INVOKESTATIC, legacyApi, 'clearInterface', '()V', false))
+        // 4 args: use the recorded flag rather than guessing it from the opcode.
+        def forward = fourArgs.instructions.find {
+            it instanceof MethodInsnNode && it.name == 'visitMethodInsn' && it.desc == fiveArgs.desc
+        }
+        fourArgs.instructions.insertBefore(forward,
+                new MethodInsnNode(Opcodes.INVOKESTATIC, legacyApi, 'interfaceFlag', '(Z)Z', false))
+        removeApiChecks(node)
+    },
+]
+
+/** The NEW of the exception thrown right after {@code insn}. */
+def previousNew(AbstractInsnNode insn) {
+    while (insn.opcode != Opcodes.NEW) {
+        insn = insn.previous
+    }
+    return insn
+}
+
+/** Replaces the instructions from {@code create} to the next ATHROW. */
+def replaceThrow(MethodNode method, AbstractInsnNode create, InsnList replacement) {
+    def insn = create
+    while (insn.opcode != Opcodes.ATHROW) {
+        def next = insn.next
+        method.instructions.remove(insn)
+        insn = next
+    }
+    method.instructions.insertBefore(insn, replacement)
+    method.instructions.remove(insn)
+}
+
+/** Removes every {@code throw new UnsupportedOperationException("<feature> requires ASMx")}. */
+def removeApiChecks(ClassNode node) {
+    int removed = 0
+    node.methods.each { method ->
+        def checks = method.instructions.findAll {
+            it.opcode == Opcodes.LDC && it.cst instanceof String && it.cst ==~ /.* requires ASM\d+/
+        }
+        checks.each { check ->
+            replaceThrow(method, previousNew(check), new InsnList())
+            removed++
+        }
+    }
+    if (removed == 0) {
+        throw new GradleException("ASM ${node.name}: no API check found")
+    }
+}
+
+tasks.register('patchAsm') {
+    inputs.files configurations.bundledAsm
+    inputs.property 'patches', asmPatches.keySet().join(',')
+    outputs.dir patchedAsmDir
+    doLast {
+        asmPatches.each { name, patch ->
+            def bytes = configurations.bundledAsm.collect { jar ->
+                zipTree(jar).matching { include "${name}.class" }.files
+            }.flatten().first().bytes
+            def node = new ClassNode()
+            new ClassReader(bytes).accept(node, 0)
+            patch(node)
+            def writer = new ClassWriter(ClassWriter.COMPUTE_MAXS)
+            node.accept(writer)
+            def out = patchedAsmDir.get().file("${name}.class").asFile
+            out.parentFile.mkdirs()
+            out.bytes = writer.toByteArray()
+        }
+    }
+}
+
 jar {
+    dependsOn 'patchAsm'
+    from(patchedAsmDir)
     archiveBaseName = 'mcpc-java17-agent'
     archiveVersion = ''
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from({ configurations.bundledAsm.collect { zipTree(it) } }) {
+        include 'org/objectweb/asm/**'
+        exclude asmPatches.keySet().collect { "${it}.class" }
+    }
+    from({ configurations.legacyAsmCommons.collect { zipTree(it) } }) {
+        include 'org/objectweb/asm/commons/Remapping*Adapter*.class'
+    }
     manifest {
         attributes(
             'Premain-Class': 'gg.nationsglory.mcpcj17.McpcJava17Agent',
             'Can-Redefine-Classes': 'false',
             'Can-Retransform-Classes': 'false',
             'Implementation-Title': 'MCPC+ Java 17 Agent',
-            'Implementation-Version': project.version
+            'Implementation-Version': project.version,
+            'Bundled-ASM-Version': asmVersion
         )
     }
 }

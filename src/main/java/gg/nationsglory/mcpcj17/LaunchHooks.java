@@ -35,11 +35,18 @@ public final class LaunchHooks {
      * LaunchClassLoader has the bootstrap loader as parent. On Java 8 that covered the whole JDK;
      * since Java 9, modules such as java.sql or java.scripting live in the platform loader, so their
      * packages (javax.sql, javax.script...) must be delegated explicitly.
+     *
+     * @param shareAsm when ASM 4 is replaced by the ASM bundled in the agent: the loader then
+     *                 delegates ASM to the application class loader, which also finds the classes
+     *                 that did not exist in ASM 4
      */
-    public static void configure(ClassLoader launchClassLoader) {
+    public static void configure(ClassLoader launchClassLoader, boolean shareAsm) {
         try {
             Method exclude = launchClassLoader.getClass().getMethod("addClassLoaderExclusion", String.class);
             exclude.invoke(launchClassLoader, "gg.nationsglory.mcpcj17.");
+            if (shareAsm) {
+                exclude.invoke(launchClassLoader, "org.objectweb.asm.");
+            }
             int count = 0;
             for (Module module : ModuleLayer.boot().modules()) {
                 if (module.getClassLoader() == null) {

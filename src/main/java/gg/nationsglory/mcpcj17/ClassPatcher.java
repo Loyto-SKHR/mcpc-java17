@@ -1,23 +1,24 @@
 package gg.nationsglory.mcpcj17;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.InputStream;
 import java.lang.instrument.ClassFileTransformer;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.ProtectionDomain;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 
 public final class ClassPatcher implements ClassFileTransformer {
 
     private static final Map<String, String> TARGETS = new HashMap<String, String>();
     static {
         TARGETS.put("net/minecraft/launchwrapper/Launch", "Launch.bin");
-        TARGETS.put("org/objectweb/asm/commons/Remapper", "Remapper.bin");
-        TARGETS.put("org/objectweb/asm/ClassReader", "ClassReader.bin");
-        TARGETS.put("org/objectweb/asm/tree/MethodInsnNode", "MethodInsnNode.bin");
     }
 
     /** JDK 8 internals removed in Java 9, and their replacements in this agent. */
@@ -34,6 +35,8 @@ public final class ClassPatcher implements ClassFileTransformer {
     private static final String LAUNCH_CLASS_LOADER = "net.minecraft.launchwrapper.LaunchClassLoader";
 
     private final Map<String, byte[]> patches = new HashMap<String, byte[]>();
+    /** This agent's jar, which also carries a recent ASM. */
+    private final JarFile agentJar;
     private final Map<ClassLoader, Boolean> legacyAsm =
             Collections.synchronizedMap(new WeakHashMap<ClassLoader, Boolean>());
     private final Map<ClassLoader, Boolean> configuredLoaders =
@@ -49,6 +52,20 @@ public final class ClassPatcher implements ClassFileTransformer {
             }
         }
         System.out.println("[mcpc-j17] " + patches.size() + " class patch(es) loaded.");
+
+        JarFile jar = null;
+        try {
+            URL url = ClassPatcher.class.getProtectionDomain().getCodeSource().getLocation();
+            jar = new JarFile(new File(url.toURI()));
+            if (jar.getEntry("org/objectweb/asm/ClassReader.class") == null) {
+                System.out.println("[mcpc-j17] No ASM bundled in the agent jar.");
+                jar.close();
+                jar = null;
+            }
+        } catch (Throwable t) {
+            System.out.println("[mcpc-j17] Could not open the agent jar, ASM will not be upgraded: " + t);
+        }
+        this.agentJar = jar;
     }
 
     @Override
@@ -57,9 +74,14 @@ public final class ClassPatcher implements ClassFileTransformer {
         try {
             if (loader != null && LAUNCH_CLASS_LOADER.equals(loader.getClass().getName())
                     && configuredLoaders.put(loader, Boolean.TRUE) == null) {
-                LaunchHooks.configure(loader);
+                LaunchHooks.configure(loader, agentJar != null && isLegacyAsm(loader));
             }
-            if (className != null) {
+            if (className != null && className.startsWith(ASM_PREFIX)) {
+                byte[] upgraded = agentJar != null && isLegacyAsm(loader) ? bundledClass(className) : null;
+                if (upgraded != null) {
+                    return upgraded;
+                }
+            } else if (className != null) {
                 byte[] patch = patches.get(className);
                 if (patch != null && needsPatch(loader, className, original)) {
                     System.out.println("[mcpc-j17] Patched: " + className);
@@ -89,13 +111,28 @@ public final class ClassPatcher implements ClassFileTransformer {
             // The stock constructor casts the application class loader to URLClassLoader.
             return indexOf(original, "java/net/URLClassLoader".getBytes(StandardCharsets.US_ASCII)) >= 0;
         }
-        if (className.startsWith(ASM_PREFIX)) {
-            return isLegacyAsm(loader);
-        }
         return true;
     }
 
-    /** ASM 5 added type annotations; anything older is the ASM 4 these patches were made from. */
+    /** The bundled ASM version of a class, or null for an ASM 4 class that no longer exists. */
+    private byte[] bundledClass(String className) {
+        JarEntry entry = agentJar.getJarEntry(className + ".class");
+        if (entry == null) {
+            return null;
+        }
+        try (InputStream in = agentJar.getInputStream(entry)) {
+            return in.readAllBytes();
+        } catch (Throwable t) {
+            System.out.println("[mcpc-j17] Could not read bundled " + className + ": " + t);
+            return null;
+        }
+    }
+
+    /**
+     * MCPC+ ships ASM 4, which cannot read Java 8+ bytecode nor run coremods written for a recent
+     * ASM: it is then replaced by the ASM bundled in this agent. ASM 5 added type annotations;
+     * servers already on ASM 5 or later keep their own.
+     */
     private boolean isLegacyAsm(ClassLoader loader) {
         ClassLoader key = loader != null ? loader : ClassLoader.getPlatformClassLoader();
         Boolean legacy = legacyAsm.get(key);
@@ -109,7 +146,9 @@ public final class ClassPatcher implements ClassFileTransformer {
             }
             legacy = classReader != null
                     && indexOf(classReader, "readTypeAnnotations".getBytes(StandardCharsets.US_ASCII)) < 0;
-            if (!legacy) {
+            if (legacy && agentJar != null) {
+                System.out.println("[mcpc-j17] ASM 4 detected, upgrading it to the bundled ASM.");
+            } else if (!legacy) {
                 System.out.println("[mcpc-j17] Recent ASM detected, keeping the server's ASM classes.");
             }
             legacyAsm.put(key, legacy);
