@@ -5,8 +5,10 @@ import java.io.InputStream;
 import java.lang.instrument.ClassFileTransformer;
 import java.nio.charset.StandardCharsets;
 import java.security.ProtectionDomain;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.WeakHashMap;
 
 public final class ClassPatcher implements ClassFileTransformer {
 
@@ -27,7 +29,15 @@ public final class ClassPatcher implements ClassFileTransformer {
     private static final byte[] SUN_REFLECT_SLASH = "sun/reflect/".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] SUN_REFLECT_DOT = "sun.reflect.".getBytes(StandardCharsets.US_ASCII);
 
+    private static final String LAUNCH = "net/minecraft/launchwrapper/Launch";
+    private static final String ASM_PREFIX = "org/objectweb/asm/";
+    private static final String LAUNCH_CLASS_LOADER = "net.minecraft.launchwrapper.LaunchClassLoader";
+
     private final Map<String, byte[]> patches = new HashMap<String, byte[]>();
+    private final Map<ClassLoader, Boolean> legacyAsm =
+            Collections.synchronizedMap(new WeakHashMap<ClassLoader, Boolean>());
+    private final Map<ClassLoader, Boolean> configuredLoaders =
+            Collections.synchronizedMap(new WeakHashMap<ClassLoader, Boolean>());
 
     public ClassPatcher() {
         for (Map.Entry<String, String> entry : TARGETS.entrySet()) {
@@ -45,9 +55,13 @@ public final class ClassPatcher implements ClassFileTransformer {
     public byte[] transform(ClassLoader loader, String className, Class<?> redefined,
             ProtectionDomain domain, byte[] original) {
         try {
+            if (loader != null && LAUNCH_CLASS_LOADER.equals(loader.getClass().getName())
+                    && configuredLoaders.put(loader, Boolean.TRUE) == null) {
+                LaunchHooks.configure(loader);
+            }
             if (className != null) {
                 byte[] patch = patches.get(className);
-                if (patch != null) {
+                if (patch != null && needsPatch(loader, className, original)) {
                     System.out.println("[mcpc-j17] Patched: " + className);
                     return patch;
                 }
@@ -64,6 +78,43 @@ public final class ClassPatcher implements ClassFileTransformer {
             System.out.println("[mcpc-j17] Could not patch " + className + ", leaving it untouched: " + t);
         }
         return null;
+    }
+
+    /**
+     * The bundled classes replace the stock launchwrapper 1.8 and ASM 4 ones. Servers that already
+     * ship a Java 9+ ready Launch, or a recent ASM, keep their own classes.
+     */
+    private boolean needsPatch(ClassLoader loader, String className, byte[] original) {
+        if (className.equals(LAUNCH)) {
+            // The stock constructor casts the application class loader to URLClassLoader.
+            return indexOf(original, "java/net/URLClassLoader".getBytes(StandardCharsets.US_ASCII)) >= 0;
+        }
+        if (className.startsWith(ASM_PREFIX)) {
+            return isLegacyAsm(loader);
+        }
+        return true;
+    }
+
+    /** ASM 5 added type annotations; anything older is the ASM 4 these patches were made from. */
+    private boolean isLegacyAsm(ClassLoader loader) {
+        ClassLoader key = loader != null ? loader : ClassLoader.getPlatformClassLoader();
+        Boolean legacy = legacyAsm.get(key);
+        if (legacy == null) {
+            byte[] classReader = null;
+            try (InputStream in = key.getResourceAsStream("org/objectweb/asm/ClassReader.class")) {
+                if (in != null) {
+                    classReader = in.readAllBytes();
+                }
+            } catch (Throwable ignored) {
+            }
+            legacy = classReader != null
+                    && indexOf(classReader, "readTypeAnnotations".getBytes(StandardCharsets.US_ASCII)) < 0;
+            if (!legacy) {
+                System.out.println("[mcpc-j17] Recent ASM detected, keeping the server's ASM classes.");
+            }
+            legacyAsm.put(key, legacy);
+        }
+        return legacy;
     }
 
     /**

@@ -46,17 +46,21 @@ Au démarrage, la console affiche :
 [mcpc-j17] Redirected sun.reflect in: net/minecraftforge/common/EnumHelper
 ```
 
+Sur un serveur dont `Launch` ou ASM sont déjà modernisés (voir plus bas), la ligne `Patched: .../Launch` est absente et `Recent ASM detected, keeping the server's ASM classes.` apparaît : c'est normal.
+
 Si vous ne voyez aucune ligne `[mcpc-j17]`, l'agent n'est pas chargé : vérifiez que `-javaagent:` est bien **avant** `-jar` et que le chemin du jar est correct.
 
 ## Ce que l'agent corrige
 
 **1. Le refus de toute version autre que Java 7.** `FMLLaunchHandler` teste `java.version` et arrête le serveur (`... is not supported on MCPC+8.11! Please run MCPC+ using Java 7.`).
 
-L'agent présente une version `1.7.x` à cette vérification. Passer `-Djava.version=1.7.0_80` sur la ligne de commande **ne fonctionne pas** : la JVM réécrit cette propriété pendant son initialisation. Il faut le faire depuis un agent, qui s'exécute après l'initialisation de la JVM mais avant le `main` du serveur. Un coremod ne peut pas corriger ce point : `FMLLaunchHandler` est exclu du `LaunchClassLoader`.
+L'agent présente une version `1.7.x` à cette vérification (inoffensif si le serveur ne fait plus ce test). Passer `-Djava.version=1.7.0_80` sur la ligne de commande **ne fonctionne pas** : la JVM réécrit cette propriété pendant son initialisation. Il faut le faire depuis un agent, qui s'exécute après l'initialisation de la JVM mais avant le `main` du serveur. Un coremod ne peut pas corriger ce point : `FMLLaunchHandler` est exclu du `LaunchClassLoader`.
 
 **2. Le démarrage de launchwrapper.** `Launch` construit son class loader à partir de `(URLClassLoader) getClass().getClassLoader()`. Depuis Java 9, le class loader de l'application n'est plus un `URLClassLoader` : `ClassCastException` immédiate. La version corrigée de `Launch` lit le class path depuis `java.class.path`, comme les versions récentes de launchwrapper.
 
 La version corrigée garde aussi le correctif de la `ConcurrentModificationException` dans `Launch.launch` (liste des tweakers modifiée pendant son parcours).
+
+`Launch` n'est remplacé que s'il fait encore ce cast : un `Launch` déjà adapté par le serveur est conservé.
 
 **3. Les classes du JDK hors de `java.base`.** Le `LaunchClassLoader` a pour parent le class loader de bootstrap. En Java 8, celui-ci voyait tout le JDK ; depuis Java 9, des modules comme `java.sql` ou `java.scripting` sont chargés par le *platform class loader*, et des classes comme `javax.sql.DataSource` (Ebean, plugins Bukkit) deviennent introuvables. L'agent fait déléguer ces packages au JDK.
 
@@ -64,7 +68,14 @@ La version corrigée garde aussi le correctif de la `ConcurrentModificationExcep
 
 **5. `sun.reflect.ReflectionFactory`, supprimé en Java 9.** L'`EnumHelper` de Forge s'en sert pour ajouter des valeurs aux enums (biomes, types de créatures, matériaux Bukkit de MCPC+...). Les références à `sun.reflect.ReflectionFactory`, `ConstructorAccessor` et `FieldAccessor` sont redirigées, dans toutes les classes chargées, vers des équivalents fournis par l'agent qui fonctionnent sous Java 17.
 
-**6. Le déobfuscateur de Forge.** La version d'ASM embarquée dans ces serveurs échoue sur du bytecode récent (`Remapper`, `ClassReader`, `MethodInsnNode`). Les versions corrigées acceptent les classes jusqu'à Java 17.
+**6. Le déobfuscateur de Forge.** ASM 4, fourni avec ces serveurs, échoue sur du bytecode récent (`Remapper`, `ClassReader`, `MethodInsnNode`). Les versions corrigées acceptent les classes jusqu'à Java 17.
+
+Ces classes ne sont remplacées que si le serveur utilise bien ASM 4. Un serveur recompilé contre un ASM récent (5 à 9) garde son propre ASM.
+
+## Testé sur
+
+- Le build NGServer de MCPC+ 1.6.4 (Forge 9.11.1.965), compilé contre ASM 9, sous OpenJDK 17.0.20 : le serveur démarre (`Done`), génère le monde et s'arrête proprement. Sans l'agent, il plante au chargement du monde (`EnumHelper` : `sun.reflect.ReflectionFactory` absent, `java.lang` fermé).
+- Un banc reproduisant launchwrapper 1.8 d'origine et l'`EnumHelper` de Forge 1.6.4, sous OpenJDK 17 et 21.
 
 ## Portée et limites
 
